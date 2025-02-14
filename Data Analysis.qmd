@@ -1,0 +1,388 @@
+---
+title: "Data Analysis"
+format: html
+editor: visual
+---
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+library(tidyverse)
+library(osfr)
+library(gee)
+library(cowsay)
+library(ez)
+library(rvest)
+library(lme4)
+library(marginaleffects)
+```
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+df <- list.files(path = "data", full.names = TRUE) %>%
+  map_dfr(~ read_csv(.x) %>%
+            mutate(session_id = as.character(session_id)), .id = "source")
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+df_tidy <- df %>%
+  select(subject_id, rt, stimulus, response, correct_response, task, type, is_word, blurrier, correct, blur_dif, target_stimuli, sample_stimuli, target_blur, sample_blur) %>%
+  filter(task %in% c("target_sample", "perceptual", "memory"))
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+id_variant <- df %>%
+  count(subject_id) %>%
+  select(subject_id)
+
+id_variant <- id_variant %>%
+  mutate(id = rownames(id_variant)) %>%
+  mutate(id = as.numeric(id))
+
+df_tidy <- df_tidy %>%
+  left_join(id_variant) %>%
+  select(-subject_id) %>%
+  mutate(rt = as.numeric(rt))
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+df_tidy <- df_tidy %>%
+  fill(blur_dif) %>%
+  filter(task != "target_sample")
+```
+
+## Applying Exclusion Criteria
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+filter_attention <- df_tidy %>%
+  group_by(id) %>%
+  filter(type == "attention") %>%
+  count(correct) %>%
+  filter(correct == TRUE) %>%
+  filter(n < 8)
+
+filter_attention <- filter_attention$id
+```
+
+Applying a 80% attention accuracy criteria, `r length(filter_attention)` participants are being excluded.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+filter_nonresponse <- df_tidy %>%
+  group_by(id) %>%
+  count(nonresponse = is.na(rt)) %>%
+  summarize(nonresponse, non_response_rate = n / sum(n)) %>%
+  filter(nonresponse == TRUE) %>%
+  filter(non_response_rate > 0.3)
+
+filter_nonresponse <- filter_nonresponse$id
+```
+
+Applying a 30% non-response trials criteria, `r length(filter_nonresponse)` participants are being excluded.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+filter_accuracy <- df_tidy %>%
+  group_by(id, task) %>%
+  count(correct_trials = (correct == TRUE)) %>%
+  summarize(correct_trials, accuracy = n / sum(n)) %>%
+  filter(correct_trials == TRUE) %>%
+  filter(accuracy < 0.6) %>%
+  count(id)
+
+filter_accuracy <- unique(filter_accuracy$id)
+```
+
+Applying a 60% accuracy criteria for both blocks, `r length(filter_accuracy)` participants are being excluded.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+df_tidy_rt <- df_tidy %>%
+  filter(rt <= 100)
+```
+
+There were `r nrow(df_tidy_rt)` trials with a response time less or equal to 100 milliseconds that are being excluded.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+df_tidy <- df_tidy %>%
+  filter(rt > 100)
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+filter_out = c(filter_attention, filter_nonresponse, filter_accuracy)
+filter_out = unique(filter_out)
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+df_tidy <- df_tidy %>%
+  filter(!id %in% filter_out)
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+n_participants <- df_tidy %>%
+  count(id)
+```
+
+In total, there are `r length(filter_out)` participants being filtered, leaving `r nrow(n_participants)` effective subjects
+
+## Result Analysis
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+blur_prop <- df_tidy %>%
+  filter(response != "null") %>%
+  group_by(id, task, is_word) %>%
+  count(response) %>%
+  summarize(response, prop = n / sum(n), n = sum(n)) %>%
+  filter(response == "s") %>%
+  select(-response)
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+blur_prop <- blur_prop %>%
+  mutate(is_word = case_when(is_word == 0 ~ "non-word", 
+                          is_word == 1 ~ "word"))
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+nsubjects <- blur_prop %>%
+  ungroup() %>%
+  count(id)
+
+nsubjects <- nrow(nsubjects)
+```
+
+```{r}
+#| label: fig-Simple-Main-Effects
+#| warning: false
+#| message: false
+#| echo: false
+mean_blur_prop <- blur_prop %>%
+  group_by(task, is_word) %>%
+  summarize(mean_prop = mean(prop), sd = sd(prop), n = sum(n), 
+            mean_se = sd(prop) / sqrt(nsubjects))
+
+mean_blur_prop %>%
+  ggplot(aes(x = is_word, y = mean_prop, color = task))+
+  geom_line(aes(group = task))+
+  geom_point()+
+  geom_errorbar(aes(ymin = mean_prop - mean_se, ymax = mean_prop + mean_se), width = 0.1, alpha = 0.8) + 
+  labs(y = "Average Proportion for Sample Blurrier Response")
+       #title = "The Average Proportion of Responses Answering Sample Is Blurrier",)
+      #subtitle = "Across Different Conditions",
+```
+
+For both of the perceptual and memory blocks, subjects tends to judge non-word as blurrier compared with word stimulus. The memory blocks seems to show a even larger effect since the difference between words and non-words for memory block with a non-overlapping error bar is greater than the perceptual block which had overlapping error bars. This is actually what we supposed, since we expected the subjects to judge non-word stimulus as blurrier more frequently for memory blocks compared with perceptual blocks. However, the perceptual block also generated the weaken but the same trend, which leaves this for the statistical tests to determine.
+
+Another interesting finding is that participants tend to view stimulus (no matter word or non-word) to be sharper in memory blocks compared with perceptual blocks. As shown in the graph, average of the proportion is around 0.5, which is reasonable since we divided the stimulus to word/non-word to be half-half. However, both of the proportion for the two types of stimulus are well under 0.5 (even with the highest bound of the error bar) for the memory block. This suggests that participant tend to think the stimulus to be sharper when compared with the perceptual block. We have to come up with some possible explanations of what this might mean.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+blur_graph <- df_tidy %>%
+  filter(response != "null") %>%
+  group_by(task, is_word, id, blur_dif) %>%
+  count(response) %>%
+  summarize(response, n, blur_rate = n / sum(n)) %>%
+  filter(response == "s")  %>%
+  ungroup() %>%
+  group_by(task, is_word, blur_dif) %>%
+  summarize(mean_blur_rate = mean(blur_rate)) %>%
+  mutate(is_word = case_when(is_word == 0 ~ "non-word", 
+                          is_word == 1 ~ "word"))
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+blur_graph %>% 
+  ggplot(aes(x = blur_dif, y = mean_blur_rate, color = as.character(is_word)))+
+  geom_point(width = 0, height = 0.2)+
+  geom_line(aes(group = is_word))+
+  facet_wrap(~task)+
+  labs(x = "Blurriness Difference Between Sample and Target", 
+       y = "Average Proportion for Sample Blurrier Response", 
+       color = "Word or Nonword")+
+       #title = "Response Rate of Blurriness for Different Blurriness Level") + 
+  scale_x_continuous(breaks = c(-0.1, -0.05, 0.05, 0.1))
+```
+
+The proportion of blurriness respond for sample graph is actually beautiful, which is exactly what Lupyan and we found. For all blurriness levels, the proportion saying non-word samples to be blurrier is higher than that of the word samples. However, for the perceptual block, the proportions are similar and hard to tell a definite difference between word or non-word samples.
+
+Another interesting observation is that the spread of these proportions seems to be larger for perceptual blocks when compared with memory blocks. As shown in the graph, both proportions for 0.05 and 0.1 blurriness level tends to be about 10% higher when compared with that of memory blocks. This suggests that subjects tend to judge the sample to be sharper for 0.05 and 0.1 difference in memory block when compared with perceptual. Such a difference doesn't seem to occur for the -0.05 and -0.1 blurriness level. Combining with what we saw in the previous graph, maybe the general trend of memory to be sharper than perceptual contributed by the difference here for 0.05 and 0.1 blurriness level.
+
+Do other analysis to look into this?
+
+## Random Effects
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+fixed_effect_df <- df_tidy %>%
+  mutate(blur_difference = target_blur - sample_blur) %>%
+  mutate(blur_por = blur_difference / blur_dif)
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+fixed_effect_df <- fixed_effect_df %>%
+  filter(is.na(type)) %>%
+  select(id, rt, task, is_word, response, sample_stimuli, blur_por, correct) %>%
+  filter(response != "null")
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+fixed_effect_df <- fixed_effect_df %>%
+  mutate(response = factor(response)) %>%
+  mutate(correct = factor(correct))
+```
+
+### Mixed Effects for Interaction
+
+```{r}
+#| warning: false
+#| message: false
+model_together <- glmer(response ~ task * is_word + (1 + is_word*task | id) + (1  | sample_stimuli), 
+               data = fixed_effect_df, family = binomial(link = "logit"))
+summary(model_together)
+isSingular(model_together)
+```
+
+Used the random intercept for stimulus and subjects, and also the random slope for subjects. Couldn't use random slope for both because of the singularity issue.
+
+As shown in the statistic, the block types and the stimulus type are significant predictors for the response. This suggests that memory tends to be sharper than perceptual is supported by statistics. Moreover, the word_type is also significant for two blocks combined.
+
+The interaction term also became significant, which means that there is a significant interaction effect between blocktypes and is_word.
+
+```{r}
+#| warning: false
+#| message: false
+model_together2 <- glmer(response ~ task * is_word + (1 | id) + (1  | sample_stimuli), 
+               data = fixed_effect_df, family = binomial(link = "logit"))
+summary(model_together2)
+isSingular(model_together2)
+```
+
+Moreover, when we are not incorporating random slopes for the subjects, the p-value is largely reduced for interaction term for towards significant with other p-values to not drastically change. This suggests that the effect of interaction term is largely contributed by the personal variations of subjects instead of a general trend.
+
+### Marginal Effects for Perceptual and Memory
+
+```{r}
+slopes_results <- avg_slopes(model_together, by = "task", variables = "is_word")
+slopes_results
+```
+
+### Mixed Effects for Perceptual
+
+```{r}
+#| warning: false
+#| message: false
+perceptual <- fixed_effect_df %>%
+  filter(task == "perceptual")
+
+model_perceptual <- glmer(response ~ is_word + (1 + is_word | id) + (1 | sample_stimuli), 
+               data = perceptual, family = binomial(link = "logit"))
+summary(model_perceptual)
+isSingular(model_perceptual)
+```
+
+Used both of the random slopes and random intercepts for analyzing the perceptual block alone. As shown here, is_word is actually not a significant predictor for the responses, which means that we didn't replicate Lupyan's result.
+
+```{r}
+#| warning: false
+#| message: false
+memory <- fixed_effect_df %>%
+  filter(task == "memory")
+
+model_memory <- glmer(response ~ is_word + (1 + is_word| id) + (1| sample_stimuli), 
+               data = memory, family = binomial(link = "logit"))
+summary(model_memory)
+isSingular(model_memory)
+```
+
+Used both of the random slopes and random intercepts for analyzing the memory block alone. As shown here, is_word is a significant predictor for the responses. However, because of the difference of difference issue we talked about, this alone doesn't conclude there is a significant difference between memory and perceptual block since the interaction was not significant.
+
+## Anova
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+ezANOVA(blur_prop, dv = prop, wid = id, within = c(is_word, task))
+```
+
+Out of curiosity, I also did the traditional Anova test, which also shows an insignificant interaction term.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+mean_blur_prop_dif <- blur_prop %>%
+  group_by(id, task) %>%
+  mutate(prop_dif = prop - lead(prop)) %>%
+  select(-c(n, is_word)) %>%
+  filter(!is.na(prop_dif)) %>%
+  pivot_wider(
+    names_from = task,
+    values_from = c(prop, prop_dif),
+    names_sep = "_"
+  )
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+t.test(mean_blur_prop_dif$prop_dif_perceptual, mean_blur_prop_dif$prop_dif_memory, paired = TRUE, alternative = "less")
+```
+
+Like what we did in the 219 b study, I took a paried t-test to evaluate the difference of differences between the two blocks, and it came out to be insiginificant. Note that for the 219 b study, this was barely significant. Since we have a bigger sample size this time, the result here validated that the differences of memory vs. perceptual between the differences of word vs. non-word stimulus is simply not significant.
